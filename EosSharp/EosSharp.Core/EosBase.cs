@@ -382,9 +382,25 @@ namespace EosSharp.Core
         /// Creates a signed transaction using the signature provider and broadcasts it to the network
         /// </summary>
         /// <param name="trx">Transaction to send</param>
+        /// <param name="requiredKeys">Override required keys to sign transaction</param>
         /// <returns>transaction id</returns>
-        public async Task<string> CreateTransaction(Transaction trx)
+        public async Task<string> CreateTransaction(Transaction trx, List<string> requiredKeys = null)
         {
+            var signedTrx = await SignTransaction(trx, requiredKeys);
+            return await BroadcastTransaction(signedTrx);
+        }
+
+        /// <summary>
+        /// Creates a signed transaction using the signature provider
+        /// </summary>
+        /// <param name="trx">Transaction to sign</param>
+        /// <param name="requiredKeys">Override required keys to sign transaction</param>
+        /// <returns>transaction id</returns>
+        public async Task<SignedTransaction> SignTransaction(Transaction trx, List<string> requiredKeys = null)
+        {
+            if (trx == null)
+                throw new ArgumentNullException("Transaction");
+
             if (EosConfig.SignProvider == null)
                 throw new ArgumentNullException("SignProvider");
 
@@ -404,20 +420,38 @@ namespace EosSharp.Core
                 if (getInfoResult == null)
                     getInfoResult = await Api.GetInfo();
 
-                var getBlockResult = await Api.GetBlock(new GetBlockRequest()
-                {
-                    block_num_or_id = getInfoResult.last_irreversible_block_num.ToString()
-                });
+                var taposBlockNum = getInfoResult.head_block_num - (int)EosConfig.blocksBehind;
 
-                trx.expiration = getInfoResult.head_block_time.AddSeconds(EosConfig.ExpireSeconds);
-                trx.ref_block_num = (UInt16)(getInfoResult.last_irreversible_block_num & 0xFFFF);
-                trx.ref_block_prefix = getBlockResult.ref_block_prefix;
+                if ((taposBlockNum - getInfoResult.last_irreversible_block_num) < 2)
+                {
+                    var getBlockResult = await Api.GetBlock(new GetBlockRequest()
+                    {
+                        block_num_or_id = taposBlockNum.ToString()
+                    });
+                    trx.expiration = getBlockResult.timestamp.AddSeconds(EosConfig.ExpireSeconds);
+                    trx.ref_block_num = (UInt16)(getBlockResult.block_num & 0xFFFF);
+                    trx.ref_block_prefix = getBlockResult.ref_block_prefix;
+                }
+                else
+                {
+                    var getBlockHeaderState = await Api.GetBlockHeaderState(new GetBlockHeaderStateRequest()
+                    {
+                        block_num_or_id = taposBlockNum.ToString()
+                    });
+                    trx.expiration = getBlockHeaderState.header.timestamp.AddSeconds(EosConfig.ExpireSeconds);
+                    trx.ref_block_num = (UInt16)(getBlockHeaderState.block_num & 0xFFFF);
+                    trx.ref_block_prefix = Convert.ToUInt32(SerializationHelper.ReverseHex(getBlockHeaderState.id.Substring(16, 8)), 16);
+                }
             }
 
             var packedTrx = await AbiSerializer.SerializePackedTransaction(trx);
-            var availableKeys = await EosConfig.SignProvider.GetAvailableKeys();
-            var requiredKeys = await GetRequiredKeys(availableKeys.ToList(), trx);
-
+            
+            if(requiredKeys == null || requiredKeys.Count == 0)
+            {
+                var availableKeys = await EosConfig.SignProvider.GetAvailableKeys();
+                requiredKeys = await GetRequiredKeys(availableKeys.ToList(), trx);
+            }
+            
             IEnumerable<string> abis = null;
 
             if (trx.actions != null)
@@ -425,14 +459,30 @@ namespace EosSharp.Core
 
             var signatures = await EosConfig.SignProvider.Sign(chainId, requiredKeys, packedTrx, abis);
 
+            return new SignedTransaction()
+            {
+                Signatures = signatures,
+                PackedTransaction = packedTrx
+            };
+        }
+
+        /// <summary>
+        /// Broadcast signed transaction to the network
+        /// </summary>
+        /// <param name="strx">Signed transaction to send</param>
+        /// <returns></returns>
+        public async Task<string> BroadcastTransaction(SignedTransaction strx)
+        {
+            if (strx == null)
+                throw new ArgumentNullException("SignedTransaction");
+
             var result = await Api.PushTransaction(new PushTransactionRequest()
             {
-                signatures = signatures.ToArray(),
+                signatures = strx.Signatures.ToArray(),
                 compression = 0,
                 packed_context_free_data = "",
-                packed_trx = SerializationHelper.ByteArrayToHexString(packedTrx)
+                packed_trx = SerializationHelper.ByteArrayToHexString(strx.PackedTransaction)
             });
-
             return result.transaction_id;
         }
 

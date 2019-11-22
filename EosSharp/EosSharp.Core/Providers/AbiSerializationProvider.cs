@@ -448,23 +448,7 @@ namespace EosSharp.Core.Providers
 
         private static void WriteName(MemoryStream ms, object value)
         {
-            var a = new byte[8];
-            Int32 bit = 63;
-            string s = (string)value;
-            for (int i = 0; i < s.Length; ++i)
-            {
-                var c = SerializationHelper.CharToSymbol(s[i]);
-                if (bit < 5)
-                    c = (byte)(c << 1);
-                for (int j = 4; j >= 0; --j)
-                {
-                    if (bit >= 0)
-                    {
-                        a[(int)Math.Floor((decimal)(bit / 8))] |= (byte)(((c >> j) & 1) << (bit % 8));
-                        --bit;
-                    }
-                }
-            }
+            var a = SerializationHelper.ConvertNameToBytes((string)value);
             ms.Write(a, 0, 8);
         }
 
@@ -1172,8 +1156,6 @@ namespace EosSharp.Core.Providers
 
             action.data = ReadAbiStruct(data, abiStruct, abi, ref readIndex);
 
-            action.hex_data = (string)ReadString(data, ref readIndex);
-
             return action;
         }
 
@@ -1285,17 +1267,21 @@ namespace EosSharp.Core.Providers
                 value = Activator.CreateInstance(typeof(T));
             }
 
-            var valueType = value.GetType();
-            foreach (var field in abiStruct.fields)
+            if (value is IDictionary<string, object>)
             {
-                var abiValue = ReadAbiType(data, field.type, abi, ref readIndex);
-
-                if (value is IDictionary<string, object>)
+                var valueDict = value as IDictionary<string, object>;
+                foreach (var field in abiStruct.fields)
                 {
-                    (value as IDictionary<string, object>).Add(field.name, abiValue);
+                    var abiValue = ReadAbiType(data, field.type, abi, ref readIndex);
+                    valueDict.Add(field.name, abiValue);
                 }
-                else
+            }
+            else
+            {
+                var valueType = value.GetType();
+                foreach (var field in abiStruct.fields)
                 {
+                    var abiValue = ReadAbiType(data, field.type, abi, ref readIndex);
                     var fieldName = FindObjectFieldName(field.name, value.GetType());
                     valueType.GetField(fieldName).SetValue(value, abiValue);
                 }
